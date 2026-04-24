@@ -1,201 +1,102 @@
 """
-Faiter Terminal — Stock Chart API
-Yahoo Finance backend for NSE stocks + NIFTY/BANKNIFTY indices
-Deploy free on Render.com
+Faiter Terminal — Stock Chart API v2
+Alpha Vantage backend (works from Render, no IP blocks)
+Free: 25 req/day | Get key: https://www.alphavantage.co/support/#api-key
 """
-
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-import yfinance as yf
-from datetime import datetime, timedelta
-import logging
+import requests, os, logging
+from datetime import datetime
 
 app = Flask(__name__)
-CORS(app)  # Allow requests from any origin (your frontend)
-
+CORS(app)
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
-# ─── Symbol map: short name → Yahoo Finance ticker ───────────
+AV_API_KEY = os.environ.get("AV_API_KEY", "demo")
+AV_BASE = "https://www.alphavantage.co/query"
+
 SYMBOL_MAP = {
-    # NSE Stocks
-    "RELIANCE":    "RELIANCE.NS",
-    "TCS":         "TCS.NS",
-    "HDFCBANK":    "HDFCBANK.NS",
-    "INFY":        "INFY.NS",
-    "WIPRO":       "WIPRO.NS",
-    "SBIN":        "SBIN.NS",
-    "ONGC":        "ONGC.NS",
-    "ICICIBANK":   "ICICIBANK.NS",
-    "BHARTI":      "BHARTIARTL.NS",
-    "BHARTIARTL":  "BHARTIARTL.NS",
-    "ADANIENT":    "ADANIENT.NS",
-    "HINDALCO":    "HINDALCO.NS",
-    "NTPC":        "NTPC.NS",
-    "BPCL":        "BPCL.NS",
-    "COALINDIA":   "COALINDIA.NS",
-    "HCLTECH":     "HCLTECH.NS",
-    "LT":          "LT.NS",
-    "MARUTI":      "MARUTI.NS",
-    "BAJFINANCE":  "BAJFINANCE.NS",
-    "AXISBANK":    "AXISBANK.NS",
-    "KOTAKBANK":   "KOTAKBANK.NS",
-    "TATASTEEL":   "TATASTEEL.NS",
-    "TATAMOTORS":  "TATAMOTORS.NS",
-    "SUNPHARMA":   "SUNPHARMA.NS",
-    "TITAN":       "TITAN.NS",
-    "TECHM":       "TECHM.NS",
-    "HDFC":        "HDFCBANK.NS",
-    "DRREDDY":     "DRREDDY.NS",
-    "ASIANPAINT":  "ASIANPAINT.NS",
-    "BAJAJFINSV":  "BAJAJFINSV.NS",
-    "ULTRACEMCO":  "ULTRACEMCO.NS",
-    "NESTLEIND":   "NESTLEIND.NS",
-    "POWERGRID":   "POWERGRID.NS",
-    "DIVISLAB":    "DIVISLAB.NS",
-    "PFC":         "PFC.NS",
-    "REC":         "REC.NS",
-    "HDFC":        "HDFCBANK.NS",
-    # NSE Indices
-    "NIFTY":       "^NSEI",
-    "NIFTY50":     "^NSEI",
-    "BANKNIFTY":   "^NSEBANK",
-    "BNIFTY":      "^NSEBANK",
-    "NIFTYMIDCAP": "^NSEMDCP50",
-    "FINNIFTY":    "^CNXFIN",
-    # BSE
-    "SENSEX":      "^BSESN",
+    "RELIANCE":"RELIANCE.BSE","TCS":"TCS.BSE","HDFCBANK":"HDFCBANK.BSE",
+    "INFY":"INFY.BSE","WIPRO":"WIPRO.BSE","SBIN":"SBIN.BSE",
+    "ONGC":"ONGC.BSE","ICICIBANK":"ICICIBANK.BSE","BHARTI":"BHARTIARTL.BSE",
+    "ADANIENT":"ADANIENT.BSE","HINDALCO":"HINDALCO.BSE","NTPC":"NTPC.BSE",
+    "BPCL":"BPCL.BSE","COALINDIA":"COALINDIA.BSE","HCLTECH":"HCLTECH.BSE",
+    "LT":"LT.BSE","MARUTI":"MARUTI.BSE","BAJFINANCE":"BAJFINANCE.BSE",
+    "AXISBANK":"AXISBANK.BSE","KOTAKBANK":"KOTAKBANK.BSE",
+    "TATASTEEL":"TATASTEEL.BSE","TATAMOTORS":"TATAMOTORS.BSE",
+    "SUNPHARMA":"SUNPHARMA.BSE","TITAN":"TITAN.BSE","TECHM":"TECHM.BSE",
+    "HDFC":"HDFCBANK.BSE","NIFTY":"NIFTY50.BSE","NIFTY50":"NIFTY50.BSE",
+    "BANKNIFTY":"NSEBANK.BSE","BNIFTY":"NSEBANK.BSE","SENSEX":"SENSEX.BSE",
 }
 
-# ─── Valid intervals and ranges ──────────────────────────────
-VALID_INTERVALS = {"1m","2m","5m","15m","30m","60m","1h","1d","5d","1wk","1mo","3mo"}
-VALID_RANGES    = {"1d","5d","1mo","3mo","6mo","1y","2y","5y","10y","ytd","max"}
+_cache = {}
 
-def resolve_symbol(sym: str) -> str:
-    """Convert short symbol to Yahoo Finance ticker."""
+def resolve(sym):
     s = sym.strip().upper()
-    if s in SYMBOL_MAP:
-        return SYMBOL_MAP[s]
-    # If already has suffix (.NS, .BO) or is index (^), use as-is
-    if "." in s or s.startswith("^"):
-        return s
-    # Default: assume NSE
-    return s + ".NS"
+    return SYMBOL_MAP.get(s, s + ".BSE")
 
-# ─── Routes ──────────────────────────────────────────────────
+def cached(key):
+    d = _cache.get(key)
+    if d and (datetime.utcnow().timestamp() - d[1]) < 300:
+        return d[0]
 
 @app.route("/")
 def index():
-    return jsonify({
-        "name": "Faiter Terminal Chart API",
-        "version": "1.0.0",
-        "status": "running",
-        "endpoints": {
-            "/chart/<symbol>": "OHLC candlestick data",
-            "/quote/<symbol>": "Latest price + change",
-            "/search/<query>": "Symbol search",
-            "/health": "Health check"
-        }
-    })
+    return jsonify({"name":"Faiter Chart API","status":"running","key_set": AV_API_KEY != "demo"})
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok", "timestamp": datetime.utcnow().isoformat()})
+    return jsonify({"status":"ok"})
 
 @app.route("/chart/<symbol>")
-def get_chart(symbol):
-    """
-    Returns OHLC candlestick data for a symbol.
-    Query params:
-      interval: 1d (default), 1wk, 1mo, 5m, 15m etc.
-      range:    3mo (default), 1mo, 6mo, 1y, 5y etc.
-    """
+def chart(symbol):
+    interval = request.args.get("interval","1d")
+    range_ = request.args.get("range","3mo")
+    key = f"{symbol}_{interval}_{range_}"
+    c = cached(key)
+    if c: return jsonify(c)
+
+    params = {
+        "function": "TIME_SERIES_DAILY_ADJUSTED",
+        "symbol": resolve(symbol),
+        "apikey": AV_API_KEY,
+        "outputsize": "compact" if range_ in ("1mo","3mo") else "full",
+        "datatype": "json",
+    }
     try:
-        interval = request.args.get("interval", "1d")
-        range_   = request.args.get("range", "3mo")
-
-        # Validate
-        if interval not in VALID_INTERVALS:
-            return jsonify({"error": f"Invalid interval. Use: {', '.join(VALID_INTERVALS)}"}), 400
-        if range_ not in VALID_RANGES:
-            return jsonify({"error": f"Invalid range. Use: {', '.join(VALID_RANGES)}"}), 400
-
-        yahoo_sym = resolve_symbol(symbol)
-        log.info(f"Fetching {yahoo_sym} | interval={interval} range={range_}")
-
-        ticker = yf.Ticker(yahoo_sym)
-        hist   = ticker.history(period=range_, interval=interval, auto_adjust=True)
-
-        if hist.empty:
-            return jsonify({"error": f"No data found for symbol: {symbol}"}), 404
-
-        candles = []
-        for date, row in hist.iterrows():
-            # Skip rows with null OHLC
-            if any(v != v for v in [row["Open"], row["High"], row["Low"], row["Close"]]):
-                continue
-            candles.append({
-                "time":   date.strftime("%Y-%m-%d") if interval in ("1d","1wk","1mo","3mo") else int(date.timestamp()),
-                "open":   round(float(row["Open"]),  2),
-                "high":   round(float(row["High"]),  2),
-                "low":    round(float(row["Low"]),   2),
-                "close":  round(float(row["Close"]), 2),
-                "volume": int(row["Volume"]) if "Volume" in row else 0,
-            })
-
-        return jsonify({
-            "symbol":   symbol.upper(),
-            "ticker":   yahoo_sym,
-            "interval": interval,
-            "range":    range_,
-            "count":    len(candles),
-            "data":     candles
-        })
-
+        r = requests.get(AV_BASE, params=params, timeout=15)
+        data = r.json()
+        if "Information" in data or "Note" in data:
+            return jsonify({"error":"API rate limit. Set AV_API_KEY in Render environment.","get_key":"https://www.alphavantage.co/support/#api-key"}), 429
+        ts_key = next((k for k in data if "Time Series" in k), None)
+        if not ts_key:
+            return jsonify({"error":f"No data for {symbol}"}), 404
+        ts = data[ts_key]
+        range_days = {"1mo":30,"3mo":90,"6mo":180,"1y":365,"2y":730,"5y":1825}
+        candles = sorted([{
+            "time": d[:10],
+            "open": round(float(v["1. open"]),2),
+            "high": round(float(v["2. high"]),2),
+            "low":  round(float(v["3. low"]),2),
+            "close":round(float(v["5. adjusted close"]),2),
+            "volume":int(float(v["6. volume"])),
+        } for d,v in ts.items()], key=lambda x: x["time"])[-range_days.get(range_,90):]
+        result = {"symbol":symbol.upper(),"ticker":resolve(symbol),"interval":interval,"range":range_,"count":len(candles),"data":candles}
+        _cache[key] = (result, datetime.utcnow().timestamp())
+        return jsonify(result)
     except Exception as e:
-        log.error(f"Error fetching {symbol}: {e}")
-        return jsonify({"error": str(e)}), 500
-
+        log.error(f"Error: {e}")
+        return jsonify({"error":str(e)}), 500
 
 @app.route("/quote/<symbol>")
-def get_quote(symbol):
-    """Returns latest price, change, and % change for a symbol."""
+def quote(symbol):
     try:
-        yahoo_sym = resolve_symbol(symbol)
-        ticker    = yf.Ticker(yahoo_sym)
-        info      = ticker.fast_info
-
-        price     = round(float(info.last_price), 2)
-        prev      = round(float(info.previous_close), 2)
-        change    = round(price - prev, 2)
-        change_pct= round((change / prev) * 100, 2) if prev else 0
-
-        return jsonify({
-            "symbol":      symbol.upper(),
-            "ticker":      yahoo_sym,
-            "price":       price,
-            "prev_close":  prev,
-            "change":      change,
-            "change_pct":  change_pct,
-            "currency":    "INR",
-        })
-
+        r = requests.get(AV_BASE, params={"function":"GLOBAL_QUOTE","symbol":resolve(symbol),"apikey":AV_API_KEY}, timeout=10)
+        q = r.json().get("Global Quote",{})
+        return jsonify({"symbol":symbol.upper(),"price":round(float(q.get("05. price",0)),2),"change":round(float(q.get("09. change",0)),2),"change_pct":round(float(q.get("10. change percent","0%").replace("%","")),2)})
     except Exception as e:
-        log.error(f"Quote error {symbol}: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/search/<query>")
-def search_symbols(query):
-    """Returns matching NSE symbols for a search query."""
-    q = query.upper()
-    matches = [
-        {"symbol": k, "ticker": v}
-        for k, v in SYMBOL_MAP.items()
-        if q in k
-    ]
-    return jsonify({"query": query, "results": matches[:10]})
-
+        return jsonify({"error":str(e)}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=False)
